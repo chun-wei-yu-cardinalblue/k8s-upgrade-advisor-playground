@@ -133,6 +133,10 @@ jobs:
           $RELEASE_NOTES
 
           Important context:
+          - The target environment is Google Kubernetes Engine (GKE). All compatibility
+            and version concerns should be evaluated in the context of GKE constraints,
+            managed components, and the GKE release channel versioning.
+
           - If the image is from gke.gcr.io/prometheus-engine, it is part of the
             Google Managed Prometheus (GMP) ecosystem. GMP itself is managed by GKE
             and its version is tied to the GKE cluster version.
@@ -141,6 +145,11 @@ jobs:
             When advising on such upgrades, remind developers to check the target GKE
             cluster version and confirm that the new component version is compatible
             with the GMP version that GKE manages.
+          - For any component that has a documented Kubernetes version compatibility
+            matrix (e.g., kube-state-metrics, metrics-server, cert-manager, ingress-nginx),
+            always check whether the new version supports the Kubernetes version running
+            on the target GKE cluster. A large version jump may require a newer
+            Kubernetes API version than what the current cluster provides.
           - Use the PR body as the primary source of release notes, as Renovatebot
             typically includes them there. Fall back to the upstream release notes
             or your knowledge of the component if the PR body has no useful content.
@@ -174,8 +183,8 @@ jobs:
           PAYLOAD=$(jq -n \
             --arg prompt "$PROMPT" \
             '{
-              model: "claude-sonnet-4-6",
-              max_tokens: 1024,
+              model: "claude-opus-4-6",
+              max_tokens: 8096,
               messages: [{ role: "user", content: $prompt }]
             }')
 
