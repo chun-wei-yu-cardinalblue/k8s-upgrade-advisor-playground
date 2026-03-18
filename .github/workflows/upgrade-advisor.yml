@@ -32,6 +32,14 @@ jobs:
           echo "old_version=$(echo "$OLD_IMAGE" | cut -d: -f2)" >> $GITHUB_OUTPUT
           echo "new_version=$(echo "$NEW_IMAGE" | cut -d: -f2)" >> $GITHUB_OUTPUT
 
+          PR_BODY=$(gh pr view ${{ github.event.pull_request.number }} --repo ${{ github.repository }} --json body --jq '.body')
+          echo "[debug] pr_body=$PR_BODY"
+          {
+            echo "pr_body<<PR_BODY_EOF"
+            echo "$PR_BODY"
+            echo "PR_BODY_EOF"
+          } >> $GITHUB_OUTPUT
+
       - name: Fetch release notes
         id: notes
         env:
@@ -93,6 +101,7 @@ jobs:
           IMAGE_NAME: ${{ steps.parse.outputs.image_name }}
           OLD_VERSION: ${{ steps.parse.outputs.old_version }}
           NEW_VERSION: ${{ steps.parse.outputs.new_version }}
+          PR_BODY: ${{ steps.parse.outputs.pr_body }}
           RELEASE_NOTES: ${{ steps.notes.outputs.notes }}
         run: |
           PROMPT=$(cat <<EOF
@@ -104,7 +113,10 @@ jobs:
           - From: $OLD_VERSION
           - To: $NEW_VERSION
 
-          Release notes:
+          PR body (from Renovatebot, may contain release notes):
+          $PR_BODY
+
+          Release notes fetched from upstream GitHub (may be empty):
           $RELEASE_NOTES
 
           Important context:
@@ -116,31 +128,33 @@ jobs:
             When advising on such upgrades, remind developers to check the target GKE
             cluster version and confirm that the new component version is compatible
             with the GMP version that GKE manages.
-          - If no release notes are available, base your analysis on the version
-            change and your knowledge of the component.
+          - Use the PR body as the primary source of release notes, as Renovatebot
+            typically includes them there. Fall back to the upstream release notes
+            or your knowledge of the component if the PR body has no useful content.
 
           Respond strictly in the following markdown format.
-          Be concise and developer-focused. Skip anything that does not require
-          developer attention. Every section should reduce the developer's burden,
-          not add to it.
+          You are an expert. Be opinionated, direct, and confident in your judgment.
+          Your goal is to minimize the developer's workload — not to hedge.
+          Do not add manual checks as a safety net. Only flag what truly matters.
 
           ## Suggested Action
-          One clear sentence: should the developer merge this PR as-is, take action
-          first, or hold. Include the reason in one line.
+          One clear, decisive sentence. State whether to merge as-is, act first, or
+          hold — and why. Do not hedge.
 
           ## Risks
-          Bullet points only. List risks the developer must be aware of before
-          merging. If there are no meaningful risks, write "None identified."
+          Bullet points only. Only include risks that are real and specific to this
+          upgrade. Skip generic or unlikely risks. If there are no meaningful risks,
+          write "None."
 
           ## Manual Checks Required
-          Bullet points only. List things that cannot be verified automatically and
-          require a human to inspect or confirm (e.g. verify compatibility with cluster
-          version, check dependent services, validate config changes in staging).
-          If nothing requires manual attention, write "None."
+          ONLY include this section if there is a confirmed breaking change, a known
+          incompatibility, or an obvious high-impact risk that cannot be assessed
+          without human judgment. If in doubt, leave it out.
+          If nothing qualifies, write "None."
 
           ## Migration Steps
-          Numbered steps only. List concrete actions the developer must take before
-          or after applying this upgrade. If no action is needed, write "No action required."
+          Numbered steps only. Only include steps that are actually required for this
+          specific upgrade. If no action is needed, write "No action required."
           EOF
           )
 
