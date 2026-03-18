@@ -32,13 +32,36 @@ jobs:
         id: notes
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEW_VERSION: ${{ steps.parse.outputs.new_version }}
         run: |
-          BASE_VERSION=$(echo "${{ steps.parse.outputs.new_version }}" | sed 's/-gke\.[0-9]*$//')
+          BASE_VERSION=$(echo "$NEW_VERSION" | sed 's/-gke\.[0-9]*$//')
+          MINOR_PREFIX=$(echo "$BASE_VERSION" | grep -oE '^v[0-9]+\.[0-9]+')
+          NOTES=""
 
-          if RELEASE_JSON=$(gh api "repos/GoogleCloudPlatform/prometheus-engine/releases/tags/$BASE_VERSION" 2>/dev/null); then
-            NOTES=$(echo "$RELEASE_JSON" | jq -r '.body // "Release notes not available."')
-          else
-            NOTES="Release notes not available for this version."
+          # Try 1: exact tag (e.g., v0.10.0-gke.3)
+          if [ -z "$NOTES" ]; then
+            if RELEASE_JSON=$(gh api "repos/GoogleCloudPlatform/prometheus-engine/releases/tags/$NEW_VERSION" 2>/dev/null); then
+              NOTES=$(echo "$RELEASE_JSON" | jq -r '.body // empty')
+            fi
+          fi
+
+          # Try 2: base version without gke suffix (e.g., v0.10.0)
+          if [ -z "$NOTES" ]; then
+            if RELEASE_JSON=$(gh api "repos/GoogleCloudPlatform/prometheus-engine/releases/tags/$BASE_VERSION" 2>/dev/null); then
+              NOTES=$(echo "$RELEASE_JSON" | jq -r '.body // empty')
+            fi
+          fi
+
+          # Try 3: find closest release with same minor version (e.g., v0.10.x)
+          if [ -z "$NOTES" ]; then
+            NOTES=$(gh api "repos/GoogleCloudPlatform/prometheus-engine/releases" 2>/dev/null \
+              | jq -r --arg prefix "$MINOR_PREFIX" \
+                '[.[] | select(.tag_name | startswith($prefix))] | first | .body // empty' 2>/dev/null || true)
+          fi
+
+          # Fallback
+          if [ -z "$NOTES" ]; then
+            NOTES="Release notes not available for $NEW_VERSION."
           fi
 
           {
@@ -67,6 +90,18 @@ jobs:
 
           Release notes:
           $RELEASE_NOTES
+
+          Important context:
+          - If the image is from gke.gcr.io/prometheus-engine, it is part of the
+            Google Managed Prometheus (GMP) ecosystem. GMP itself is managed by GKE
+            and its version is tied to the GKE cluster version.
+          - Components like datasource-syncer are addons outside of GMP, but their
+            version should be aligned with the GMP/GKE version to ensure compatibility.
+            When advising on such upgrades, remind developers to check the target GKE
+            cluster version and confirm that the new component version is compatible
+            with the GMP version that GKE manages.
+          - If no release notes are available, base your analysis on the version
+            change and your knowledge of the component.
 
           Provide a concise upgrade report covering:
           1. **Component overview**: What this component does in a Kubernetes cluster
