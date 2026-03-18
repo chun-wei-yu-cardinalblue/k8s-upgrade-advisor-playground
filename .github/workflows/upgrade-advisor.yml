@@ -119,13 +119,28 @@ jobs:
           - If no release notes are available, base your analysis on the version
             change and your knowledge of the component.
 
-          Provide a concise upgrade report covering:
-          1. **Component overview**: What this component does in a Kubernetes cluster
-          2. **What changed**: Summary of changes between versions
-          3. **Breaking changes**: Any breaking changes or deprecations
-          4. **Migration steps**: Actions required before or after applying the upgrade
-          5. **Risk level**: Low / Medium / High (with brief justification)
-          6. **Recommendation**: Proceed / Proceed with caution / Hold
+          Respond strictly in the following markdown format.
+          Be concise and developer-focused. Skip anything that does not require
+          developer attention. Every section should reduce the developer's burden,
+          not add to it.
+
+          ## Suggested Action
+          One clear sentence: should the developer merge this PR as-is, take action
+          first, or hold. Include the reason in one line.
+
+          ## Risks
+          Bullet points only. List risks the developer must be aware of before
+          merging. If there are no meaningful risks, write "None identified."
+
+          ## Manual Checks Required
+          Bullet points only. List things that cannot be verified automatically and
+          require a human to inspect or confirm (e.g. verify compatibility with cluster
+          version, check dependent services, validate config changes in staging).
+          If nothing requires manual attention, write "None."
+
+          ## Migration Steps
+          Numbered steps only. List concrete actions the developer must take before
+          or after applying this upgrade. If no action is needed, write "No action required."
           EOF
           )
 
