@@ -1,0 +1,12 @@
+{
+  "enabledManagers": ["kubernetes"],
+  "kubernetes": {
+    "fileMatch": ["k8s/manually-applied/.+\\.yaml$"]
+  },
+  "packageRules": [
+    {
+      "matchPackageNames": ["gke.gcr.io/prometheus-engine/datasource-syncer"],
+      "versioning": "regex:^v(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)-gke\\.(?<build>\\d+)$"
+    }
+  ]
+}
