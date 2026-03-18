@@ -2,7 +2,9 @@ name: Upgrade Advisor
 
 on:
   pull_request:
-    types: [opened, reopened]
+    types: [opened, reopened, synchronize]
+  issue_comment:
+    types: [created]
 
 permissions:
   contents: read
@@ -10,30 +12,55 @@ permissions:
 
 jobs:
   upgrade-advisor:
-    if: github.event.pull_request.user.login == 'renovate[bot]'
+    if: >-
+      (github.event_name == 'pull_request' && github.event.pull_request.user.login == 'renovate[bot]') ||
+      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '/upgrade-advisor') && github.event.issue.pull_request != null)
     runs-on: ubuntu-latest
 
     steps:
-      - name: Parse image change from PR diff
+      - name: Resolve PR number
+        id: pr
+        run: |
+          if [ "${{ github.event_name }}" = "issue_comment" ]; then
+            echo "number=${{ github.event.issue.number }}" >> $GITHUB_OUTPUT
+          else
+            echo "number=${{ github.event.pull_request.number }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Parse image changes from PR diff
         id: parse
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
         run: |
-          DIFF=$(gh pr diff ${{ github.event.pull_request.number }} --repo ${{ github.repository }})
-          echo "[debug] raw diff:"
-          echo "$DIFF"
+          DIFF=$(gh pr diff "$PR_NUMBER" --repo ${{ github.repository }})
+          PR_BODY=$(gh pr view "$PR_NUMBER" --repo ${{ github.repository }} --json body --jq '.body')
 
-          OLD_IMAGE=$(echo "$DIFF" | grep '^-' | grep 'image:' | sed 's/.*image:[[:space:]]*//' | tr -d '[:space:]')
-          NEW_IMAGE=$(echo "$DIFF" | grep '^+' | grep 'image:' | sed 's/.*image:[[:space:]]*//' | tr -d '[:space:]')
-          echo "[debug] old_image=$OLD_IMAGE"
-          echo "[debug] new_image=$NEW_IMAGE"
+          # Extract all changed image lines; exclude diff file headers (--- / +++)
+          OLD_IMAGES=$(echo "$DIFF" | grep -E '^-.*image:' | grep -v '^---' | sed 's/.*image:[[:space:]]*//' | tr -d '[:space:]')
+          NEW_IMAGES=$(echo "$DIFF" | grep -E '^\+.*image:' | grep -v '^+++' | sed 's/.*image:[[:space:]]*//' | tr -d '[:space:]')
 
-          echo "image_name=$(echo "$NEW_IMAGE" | cut -d: -f1)" >> $GITHUB_OUTPUT
-          echo "old_version=$(echo "$OLD_IMAGE" | cut -d: -f2)" >> $GITHUB_OUTPUT
-          echo "new_version=$(echo "$NEW_IMAGE" | cut -d: -f2)" >> $GITHUB_OUTPUT
+          # Build JSON array of {old, new} pairs
+          OLD_ARR=$(echo "$OLD_IMAGES" | jq -R 'select(length > 0)' | jq -s .)
+          NEW_ARR=$(echo "$NEW_IMAGES" | jq -R 'select(length > 0)' | jq -s .)
+          CHANGES=$(jq -n --argjson old "$OLD_ARR" --argjson new "$NEW_ARR" \
+            '[$old, $new] | transpose | map({old: .[0], new: .[1]})')
 
-          PR_BODY=$(gh pr view ${{ github.event.pull_request.number }} --repo ${{ github.repository }} --json body --jq '.body')
-          echo "[debug] pr_body=$PR_BODY"
+          # Extract GitHub org/repo from PR body (Renovate links to the source repo)
+          GITHUB_REPO=$(echo "$PR_BODY" | \
+            grep -oE 'github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+' | \
+            grep -vE 'github\.com/(apps|marketplace|features)/' | \
+            head -1 | sed 's|github\.com/||')
+
+          {
+            echo "changes<<CHANGES_EOF"
+            echo "$CHANGES"
+            echo "CHANGES_EOF"
+          } >> $GITHUB_OUTPUT
+
+          echo "github_repo=$GITHUB_REPO" >> $GITHUB_OUTPUT
+          echo "count=$(echo "$CHANGES" | jq 'length')" >> $GITHUB_OUTPUT
+
           {
             echo "pr_body<<PR_BODY_EOF"
             echo "$PR_BODY"
@@ -42,76 +69,62 @@ jobs:
 
       - name: Fetch release notes
         id: notes
+        if: steps.parse.outputs.count != '0'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          NEW_VERSION: ${{ steps.parse.outputs.new_version }}
+          GITHUB_REPO: ${{ steps.parse.outputs.github_repo }}
+          CHANGES: ${{ steps.parse.outputs.changes }}
         run: |
-          BASE_VERSION=$(echo "$NEW_VERSION" | sed 's/-gke\.[0-9]*$//')
-          MINOR_PREFIX=$(echo "$BASE_VERSION" | grep -oE '^v[0-9]+\.[0-9]+')
-          echo "[debug] new_version=$NEW_VERSION base_version=$BASE_VERSION minor_prefix=$MINOR_PREFIX"
           NOTES=""
 
-          # Try 1: exact tag (e.g., v0.10.0-gke.3)
-          if [ -z "$NOTES" ]; then
-            echo "[debug] trying exact tag: $NEW_VERSION"
-            if RELEASE_JSON=$(gh api "repos/GoogleCloudPlatform/prometheus-engine/releases/tags/$NEW_VERSION" 2>/dev/null); then
+          if [ -n "$GITHUB_REPO" ]; then
+            NEW_VERSION=$(echo "$CHANGES" | jq -r 'first | .new | split(":")[1] // empty')
+            BASE_VERSION=$(echo "$NEW_VERSION" | sed 's/-gke\.[0-9]*$//')
+            MINOR_PREFIX=$(echo "$BASE_VERSION" | grep -oE '^v[0-9]+\.[0-9]+')
+
+            # Try 1: exact tag (e.g., v0.10.0-gke.3)
+            if RELEASE_JSON=$(gh api "repos/$GITHUB_REPO/releases/tags/$NEW_VERSION" 2>/dev/null); then
               NOTES=$(echo "$RELEASE_JSON" | jq -r '.body // empty')
-              echo "[debug] try 1 succeeded"
-            else
-              echo "[debug] try 1 failed"
             fi
-          fi
 
-          # Try 2: base version without gke suffix (e.g., v0.10.0)
-          if [ -z "$NOTES" ]; then
-            echo "[debug] trying base version: $BASE_VERSION"
-            if RELEASE_JSON=$(gh api "repos/GoogleCloudPlatform/prometheus-engine/releases/tags/$BASE_VERSION" 2>/dev/null); then
-              NOTES=$(echo "$RELEASE_JSON" | jq -r '.body // empty')
-              echo "[debug] try 2 succeeded"
-            else
-              echo "[debug] try 2 failed"
+            # Try 2: base version without distribution suffix (e.g., v0.10.0)
+            if [ -z "$NOTES" ]; then
+              if RELEASE_JSON=$(gh api "repos/$GITHUB_REPO/releases/tags/$BASE_VERSION" 2>/dev/null); then
+                NOTES=$(echo "$RELEASE_JSON" | jq -r '.body // empty')
+              fi
             fi
-          fi
 
-          # Try 3: find closest release with same minor version (e.g., v0.10.x)
-          if [ -z "$NOTES" ]; then
-            echo "[debug] trying minor version prefix: $MINOR_PREFIX"
-            NOTES=$(gh api "repos/GoogleCloudPlatform/prometheus-engine/releases" 2>/dev/null \
-              | jq -r --arg prefix "$MINOR_PREFIX" \
-                '[.[] | select(.tag_name | startswith($prefix))] | first | .body // empty' 2>/dev/null || true)
-            echo "[debug] try 3 notes=$NOTES"
-          fi
-
-          # Fallback
-          if [ -z "$NOTES" ]; then
-            echo "[debug] all tries failed, using fallback"
-            NOTES="Release notes not available for $NEW_VERSION."
+            # Try 3: latest release with same minor version (e.g., v0.10.x)
+            if [ -z "$NOTES" ] && [ -n "$MINOR_PREFIX" ]; then
+              NOTES=$(gh api "repos/$GITHUB_REPO/releases" 2>/dev/null | \
+                jq -r --arg prefix "$MINOR_PREFIX" \
+                  '[.[] | select(.tag_name | startswith($prefix))] | first | .body // empty' 2>/dev/null || true)
+            fi
           fi
 
           {
             echo "notes<<NOTES_EOF"
-            echo "$NOTES"
+            echo "${NOTES:-Release notes not available.}"
             echo "NOTES_EOF"
           } >> "$GITHUB_OUTPUT"
 
       - name: Analyze upgrade with Claude
         id: advice
+        if: steps.parse.outputs.count != '0'
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          IMAGE_NAME: ${{ steps.parse.outputs.image_name }}
-          OLD_VERSION: ${{ steps.parse.outputs.old_version }}
-          NEW_VERSION: ${{ steps.parse.outputs.new_version }}
+          CHANGES: ${{ steps.parse.outputs.changes }}
           PR_BODY: ${{ steps.parse.outputs.pr_body }}
           RELEASE_NOTES: ${{ steps.notes.outputs.notes }}
         run: |
+          CHANGES_TEXT=$(echo "$CHANGES" | jq -r '.[] | "- \(.old) → \(.new)"')
+
           PROMPT=$(cat <<EOF
           You are a Kubernetes cluster upgrade advisor. You help developers understand
           the impact of upgrading any cluster component, regardless of what it is.
 
-          A Renovatebot PR was opened for the following image upgrade:
-          - Image: $IMAGE_NAME
-          - From: $OLD_VERSION
-          - To: $NEW_VERSION
+          A Renovatebot PR was opened for the following image upgrade(s):
+          $CHANGES_TEXT
 
           PR body (from Renovatebot, may contain release notes):
           $PR_BODY
@@ -161,22 +174,18 @@ jobs:
           PAYLOAD=$(jq -n \
             --arg prompt "$PROMPT" \
             '{
-              model: "claude-opus-4-6",
+              model: "claude-sonnet-4-6",
               max_tokens: 1024,
               messages: [{ role: "user", content: $prompt }]
             }')
-
-          echo "[debug] prompt=$PROMPT"
 
           RESPONSE=$(curl -s "https://api.anthropic.com/v1/messages" \
             -H "x-api-key: $ANTHROPIC_API_KEY" \
             -H "anthropic-version: 2023-06-01" \
             -H "content-type: application/json" \
             -d "$PAYLOAD")
-          echo "[debug] claude response=$RESPONSE"
 
           ADVICE=$(echo "$RESPONSE" | jq -r '.content[0].text')
-          echo "[debug] advice=$ADVICE"
 
           {
             echo "advice<<ADVICE_EOF"
@@ -184,28 +193,37 @@ jobs:
             echo "ADVICE_EOF"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Post upgrade report as PR comment
+      - name: Post or update upgrade report comment
+        if: steps.parse.outputs.count != '0'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          IMAGE_NAME: ${{ steps.parse.outputs.image_name }}
-          OLD_VERSION: ${{ steps.parse.outputs.old_version }}
-          NEW_VERSION: ${{ steps.parse.outputs.new_version }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          CHANGES: ${{ steps.parse.outputs.changes }}
           ADVICE: ${{ steps.advice.outputs.advice }}
         run: |
           {
+            echo "<!-- upgrade-advisor-report -->"
             echo "## Upgrade Advisor Report"
             echo ""
-            echo "| | |"
-            echo "|---|---|"
-            printf "| **Image** | \`%s\` |\n" "$IMAGE_NAME"
-            printf "| **From** | \`%s\` |\n" "$OLD_VERSION"
-            printf "| **To** | \`%s\` |\n" "$NEW_VERSION"
+            echo "| Image | Old | New |"
+            echo "|---|---|---|"
+            echo "$CHANGES" | jq -r '.[] | "| `\(.new | split(":")[0])` | `\(.old | split(":")[1] // "latest")` | `\(.new | split(":")[1] // "latest")` |"'
             echo ""
             echo "---"
             echo ""
             echo "$ADVICE"
           } > /tmp/comment.md
 
-          gh pr comment ${{ github.event.pull_request.number }} \
-            --repo ${{ github.repository }} \
-            --body-file /tmp/comment.md
+          # Update existing report comment if present, otherwise create a new one
+          EXISTING_ID=$(gh api "repos/${{ github.repository }}/issues/$PR_NUMBER/comments" \
+            --jq '[.[] | select(.body | contains("<!-- upgrade-advisor-report -->"))] | first | .id // empty')
+
+          if [ -n "$EXISTING_ID" ]; then
+            gh api "repos/${{ github.repository }}/issues/comments/$EXISTING_ID" \
+              -X PATCH \
+              -F "body=@/tmp/comment.md"
+          else
+            gh pr comment "$PR_NUMBER" \
+              --repo ${{ github.repository }} \
+              --body-file /tmp/comment.md
+          fi
