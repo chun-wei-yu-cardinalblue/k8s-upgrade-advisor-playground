@@ -20,9 +20,13 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           DIFF=$(gh pr diff ${{ github.event.pull_request.number }} --repo ${{ github.repository }})
+          echo "[debug] raw diff:"
+          echo "$DIFF"
 
           OLD_IMAGE=$(echo "$DIFF" | grep '^-' | grep 'image:' | sed 's/.*image:[[:space:]]*//' | tr -d '[:space:]')
           NEW_IMAGE=$(echo "$DIFF" | grep '^+' | grep 'image:' | sed 's/.*image:[[:space:]]*//' | tr -d '[:space:]')
+          echo "[debug] old_image=$OLD_IMAGE"
+          echo "[debug] new_image=$NEW_IMAGE"
 
           echo "image_name=$(echo "$NEW_IMAGE" | cut -d: -f1)" >> $GITHUB_OUTPUT
           echo "old_version=$(echo "$OLD_IMAGE" | cut -d: -f2)" >> $GITHUB_OUTPUT
@@ -36,31 +40,43 @@ jobs:
         run: |
           BASE_VERSION=$(echo "$NEW_VERSION" | sed 's/-gke\.[0-9]*$//')
           MINOR_PREFIX=$(echo "$BASE_VERSION" | grep -oE '^v[0-9]+\.[0-9]+')
+          echo "[debug] new_version=$NEW_VERSION base_version=$BASE_VERSION minor_prefix=$MINOR_PREFIX"
           NOTES=""
 
           # Try 1: exact tag (e.g., v0.10.0-gke.3)
           if [ -z "$NOTES" ]; then
+            echo "[debug] trying exact tag: $NEW_VERSION"
             if RELEASE_JSON=$(gh api "repos/GoogleCloudPlatform/prometheus-engine/releases/tags/$NEW_VERSION" 2>/dev/null); then
               NOTES=$(echo "$RELEASE_JSON" | jq -r '.body // empty')
+              echo "[debug] try 1 succeeded"
+            else
+              echo "[debug] try 1 failed"
             fi
           fi
 
           # Try 2: base version without gke suffix (e.g., v0.10.0)
           if [ -z "$NOTES" ]; then
+            echo "[debug] trying base version: $BASE_VERSION"
             if RELEASE_JSON=$(gh api "repos/GoogleCloudPlatform/prometheus-engine/releases/tags/$BASE_VERSION" 2>/dev/null); then
               NOTES=$(echo "$RELEASE_JSON" | jq -r '.body // empty')
+              echo "[debug] try 2 succeeded"
+            else
+              echo "[debug] try 2 failed"
             fi
           fi
 
           # Try 3: find closest release with same minor version (e.g., v0.10.x)
           if [ -z "$NOTES" ]; then
+            echo "[debug] trying minor version prefix: $MINOR_PREFIX"
             NOTES=$(gh api "repos/GoogleCloudPlatform/prometheus-engine/releases" 2>/dev/null \
               | jq -r --arg prefix "$MINOR_PREFIX" \
                 '[.[] | select(.tag_name | startswith($prefix))] | first | .body // empty' 2>/dev/null || true)
+            echo "[debug] try 3 notes=$NOTES"
           fi
 
           # Fallback
           if [ -z "$NOTES" ]; then
+            echo "[debug] all tries failed, using fallback"
             NOTES="Release notes not available for $NEW_VERSION."
           fi
 
@@ -121,13 +137,17 @@ jobs:
               messages: [{ role: "user", content: $prompt }]
             }')
 
+          echo "[debug] prompt=$PROMPT"
+
           RESPONSE=$(curl -s "https://api.anthropic.com/v1/messages" \
             -H "x-api-key: $ANTHROPIC_API_KEY" \
             -H "anthropic-version: 2023-06-01" \
             -H "content-type: application/json" \
             -d "$PAYLOAD")
+          echo "[debug] claude response=$RESPONSE"
 
           ADVICE=$(echo "$RESPONSE" | jq -r '.content[0].text')
+          echo "[debug] advice=$ADVICE"
 
           {
             echo "advice<<ADVICE_EOF"
