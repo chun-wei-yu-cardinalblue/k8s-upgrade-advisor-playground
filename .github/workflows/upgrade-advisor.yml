@@ -1,0 +1,127 @@
+name: Upgrade Advisor
+
+on:
+  pull_request:
+    types: [opened, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  upgrade-advisor:
+    if: github.event.pull_request.user.login == 'renovate[bot]'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Parse image change from PR diff
+        id: parse
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          DIFF=$(gh pr diff ${{ github.event.pull_request.number }} --repo ${{ github.repository }})
+
+          OLD_IMAGE=$(echo "$DIFF" | grep '^-' | grep 'image:' | sed 's/.*image:[[:space:]]*//' | tr -d '[:space:]')
+          NEW_IMAGE=$(echo "$DIFF" | grep '^+' | grep 'image:' | sed 's/.*image:[[:space:]]*//' | tr -d '[:space:]')
+
+          echo "image_name=$(echo "$NEW_IMAGE" | cut -d: -f1)" >> $GITHUB_OUTPUT
+          echo "old_version=$(echo "$OLD_IMAGE" | cut -d: -f2)" >> $GITHUB_OUTPUT
+          echo "new_version=$(echo "$NEW_IMAGE" | cut -d: -f2)" >> $GITHUB_OUTPUT
+
+      - name: Fetch release notes
+        id: notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BASE_VERSION=$(echo "${{ steps.parse.outputs.new_version }}" | sed 's/-gke\.[0-9]*$//')
+
+          if RELEASE_JSON=$(gh api "repos/GoogleCloudPlatform/prometheus-engine/releases/tags/$BASE_VERSION" 2>/dev/null); then
+            NOTES=$(echo "$RELEASE_JSON" | jq -r '.body // "Release notes not available."')
+          else
+            NOTES="Release notes not available for this version."
+          fi
+
+          {
+            echo "notes<<NOTES_EOF"
+            echo "$NOTES"
+            echo "NOTES_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Analyze upgrade with Claude
+        id: advice
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          IMAGE_NAME: ${{ steps.parse.outputs.image_name }}
+          OLD_VERSION: ${{ steps.parse.outputs.old_version }}
+          NEW_VERSION: ${{ steps.parse.outputs.new_version }}
+          RELEASE_NOTES: ${{ steps.notes.outputs.notes }}
+        run: |
+          PROMPT=$(cat <<EOF
+          You are a Kubernetes cluster upgrade advisor. You help developers understand
+          the impact of upgrading any cluster component, regardless of what it is.
+
+          A Renovatebot PR was opened for the following image upgrade:
+          - Image: $IMAGE_NAME
+          - From: $OLD_VERSION
+          - To: $NEW_VERSION
+
+          Release notes:
+          $RELEASE_NOTES
+
+          Provide a concise upgrade report covering:
+          1. **Component overview**: What this component does in a Kubernetes cluster
+          2. **What changed**: Summary of changes between versions
+          3. **Breaking changes**: Any breaking changes or deprecations
+          4. **Migration steps**: Actions required before or after applying the upgrade
+          5. **Risk level**: Low / Medium / High (with brief justification)
+          6. **Recommendation**: Proceed / Proceed with caution / Hold
+          EOF
+          )
+
+          PAYLOAD=$(jq -n \
+            --arg prompt "$PROMPT" \
+            '{
+              model: "claude-opus-4-6",
+              max_tokens: 1024,
+              messages: [{ role: "user", content: $prompt }]
+            }')
+
+          RESPONSE=$(curl -s "https://api.anthropic.com/v1/messages" \
+            -H "x-api-key: $ANTHROPIC_API_KEY" \
+            -H "anthropic-version: 2023-06-01" \
+            -H "content-type: application/json" \
+            -d "$PAYLOAD")
+
+          ADVICE=$(echo "$RESPONSE" | jq -r '.content[0].text')
+
+          {
+            echo "advice<<ADVICE_EOF"
+            echo "$ADVICE"
+            echo "ADVICE_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Post upgrade report as PR comment
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE_NAME: ${{ steps.parse.outputs.image_name }}
+          OLD_VERSION: ${{ steps.parse.outputs.old_version }}
+          NEW_VERSION: ${{ steps.parse.outputs.new_version }}
+          ADVICE: ${{ steps.advice.outputs.advice }}
+        run: |
+          {
+            echo "## Upgrade Advisor Report"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            printf "| **Image** | \`%s\` |\n" "$IMAGE_NAME"
+            printf "| **From** | \`%s\` |\n" "$OLD_VERSION"
+            printf "| **To** | \`%s\` |\n" "$NEW_VERSION"
+            echo ""
+            echo "---"
+            echo ""
+            echo "$ADVICE"
+          } > /tmp/comment.md
+
+          gh pr comment ${{ github.event.pull_request.number }} \
+            --repo ${{ github.repository }} \
+            --body-file /tmp/comment.md
