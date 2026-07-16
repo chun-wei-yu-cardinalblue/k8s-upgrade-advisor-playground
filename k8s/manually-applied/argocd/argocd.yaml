@@ -15,4 +15,4 @@ spec:
     spec:
       containers:
         - name: argocd-server
-          image: quay.io/argoproj/argocd:v3.3.3
+          image: quay.io/argoproj/argocd:v3.4.5
