@@ -15,4 +15,4 @@ spec:
     spec:
       containers:
         - name: datasource-syncer
-          image: gke.gcr.io/prometheus-engine/datasource-syncer:v0.10.0-gke.3
+          image: gke.gcr.io/prometheus-engine/datasource-syncer:v0.18.1-gke.2
